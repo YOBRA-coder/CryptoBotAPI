@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
 from pathlib import Path
-
+import websockets
 import aiohttp
 import jwt
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, status
@@ -496,7 +496,45 @@ class ConnectionManager:
         return list(self.connections.keys())
 
 manager = ConnectionManager()
+async def kline_stream(symbol: str, interval: str):
+    url = f"wss://stream.binance.com:9443/ws/{symbol.lower()}@kline_{interval}"
 
+    last_emit = 0
+    last_time = None
+
+    while True:
+        try:
+            async with websockets.connect(url) as ws:
+                async for msg in ws:
+                    data = json.loads(msg)
+                    k = data.get("k", {})
+
+                    candle = {
+                        "time": k["t"],
+                        "open": float(k["o"]),
+                        "high": float(k["h"]),
+                        "low": float(k["l"]),
+                        "close": float(k["c"]),
+                        "volume": float(k["v"]),
+                        "closed": k["x"],
+                    }
+
+                    now = time.time()
+
+                    # throttle + prevent spam
+                    if candle["time"] != last_time or candle["closed"] or (now - last_emit > 1):
+                        await manager.broadcast({
+                            "type": "KLINE",
+                            "symbol": symbol.upper(),
+                            "interval": interval,
+                            "data": candle
+                        })
+                        last_emit = now
+                        last_time = candle["time"]
+
+        except Exception as e:
+            log.error(f"Kline WS error ({symbol}-{interval}): {e}")
+            await asyncio.sleep(3)
 # ── Background Tasks ────────────────────────────────────────────────────────────
 async def market_data_loop():
     """Continuously fetch market data and broadcast to connected clients."""
@@ -567,9 +605,10 @@ async def lifespan(app: FastAPI):
     #seed_demo_data()
     t1 = asyncio.create_task(market_data_loop())
     t2 = asyncio.create_task(bot_simulation_loop())
+    t3 = asyncio.create_task(kline_stream("btcusdt", "1m"))
     log.info("NexusAI backend started")
     yield
-    t1.cancel(); t2.cancel()
+    t1.cancel(); t2.cancel(), t3.cancel();
     log.info("NexusAI backend stopped")
 
 def seed_demo_data():
