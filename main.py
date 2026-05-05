@@ -496,45 +496,31 @@ class ConnectionManager:
         return list(self.connections.keys())
 
 manager = ConnectionManager()
-async def kline_stream(symbol: str, interval: str):
-    url = f"wss://stream.binance.com:9443/ws/{symbol.lower()}@kline_{interval}"
+async def kline_loop():
+    """Fetch klines via REST and broadcast like WebSocket"""
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                symbols = ["BTCUSDT", "ETHUSDT"]  # add more if needed
 
-    last_emit = 0
-    last_time = None
+                for symbol in symbols:
+                    candles = await fetch_klines(session, symbol, "1m", 2)
 
-    while True:
-        try:
-            async with websockets.connect(url) as ws:
-                async for msg in ws:
-                    data = json.loads(msg)
-                    k = data.get("k", {})
+                    if candles:
+                        latest = candles[-1]
 
-                    candle = {
-                        "time": k["t"],
-                        "open": float(k["o"]),
-                        "high": float(k["h"]),
-                        "low": float(k["l"]),
-                        "close": float(k["c"]),
-                        "volume": float(k["v"]),
-                        "closed": k["x"],
-                    }
-
-                    now = time.time()
-
-                    # throttle + prevent spam
-                    if candle["time"] != last_time or candle["closed"] or (now - last_emit > 1):
                         await manager.broadcast({
                             "type": "KLINE",
-                            "symbol": symbol.upper(),
-                            "interval": interval,
-                            "data": candle
+                            "symbol": symbol,
+                            "interval": "1m",
+                            "data": latest
                         })
-                        last_emit = now
-                        last_time = candle["time"]
 
-        except Exception as e:
-            log.error(f"Kline WS error ({symbol}-{interval}): {e}")
-            await asyncio.sleep(3)
+            except Exception as e:
+                log.error(f"Kline loop error: {e}")
+
+            await asyncio.sleep(2)
+            
 # ── Background Tasks ────────────────────────────────────────────────────────────
 async def market_data_loop():
     """Continuously fetch market data and broadcast to connected clients."""
@@ -605,7 +591,7 @@ async def lifespan(app: FastAPI):
     #seed_demo_data()
     t1 = asyncio.create_task(market_data_loop())
     t2 = asyncio.create_task(bot_simulation_loop())
-    t3 = asyncio.create_task(kline_stream("btcusdt", "1m"))
+    t3 = asyncio.create_task(kline_loop())
     log.info("NexusAI backend started")
     yield
     t1.cancel(); t2.cancel(), t3.cancel();
